@@ -1167,6 +1167,8 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
 	if (!pci_host_common_can_enter_d3cold(pci->pp.bridge))
 		return 0;
 
+	pci->pp.skip_pwrctrl_off = true;
+
 	if (pci->pp.ops->pme_turn_off) {
 		pci->pp.ops->pme_turn_off(&pci->pp);
 	} else {
@@ -1222,6 +1224,7 @@ int dw_pcie_resume_noirq(struct dw_pcie *pci)
 		return 0;
 
 	pci->suspended = false;
+	pci->pp.skip_pwrctrl_off = false;
 
 	if (pci->pp.ops->init) {
 		ret = pci->pp.ops->init(&pci->pp);
