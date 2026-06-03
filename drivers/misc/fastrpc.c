@@ -511,8 +511,7 @@ static void fastrpc_user_free(struct kref *ref)
 	struct fastrpc_map *map, *m;
 	struct fastrpc_buf *buf, *b;
 
-	if (fl->init_mem)
-		fastrpc_buf_free(fl->init_mem);
+	fastrpc_buf_free(fl->init_mem);
 
 	list_for_each_entry_safe(ctx, n, &fl->pending, node) {
 		list_del(&ctx->node);
@@ -1430,6 +1429,14 @@ static int fastrpc_init_create_static_process(struct fastrpc_user *fl,
 	u32 sc;
 	unsigned long flags;
 
+	if (!fl->cctx->remote_heap ||
+	    !fl->cctx->remote_heap->phys ||
+	    !fl->cctx->remote_heap->size) {
+		err = -ENOMEM;
+		dev_dbg(fl->sctx->dev, "remote heap memory region is not added\n");
+		return err;
+	}
+
 	args = kcalloc(FASTRPC_CREATE_STATIC_PROCESS_NARGS, sizeof(*args), GFP_KERNEL);
 	if (!args)
 		return -ENOMEM;
@@ -1465,14 +1472,6 @@ static int fastrpc_init_create_static_process(struct fastrpc_user *fl,
 
 	spin_lock_irqsave(&cctx->lock, flags);
 	if (!fl->cctx->audio_init_mem) {
-		if (!fl->cctx->remote_heap ||
-		    !fl->cctx->remote_heap->phys ||
-		    !fl->cctx->remote_heap->size) {
-			spin_unlock_irqrestore(&cctx->lock, flags);
-			err = -ENOMEM;
-			goto err;
-		}
-
 		pages[0].addr = fl->cctx->remote_heap->phys;
 		pages[0].size = fl->cctx->remote_heap->size;
 		fl->cctx->audio_init_mem = true;
@@ -2071,17 +2070,14 @@ static int fastrpc_req_mmap(struct fastrpc_user *fl, char __user *argp)
 
 	if (copy_to_user((void __user *)argp, &req, sizeof(req))) {
 		err = -EFAULT;
-		goto err_copy;
+		goto err_assign;
 	}
 
 	dev_dbg(dev, "mmap\t\tpt 0x%09lx OK [len 0x%08llx]\n",
 		buf->raddr, buf->size);
 
 	return 0;
-err_copy:
-	spin_lock(&fl->lock);
-	list_del(&buf->node);
-	spin_unlock(&fl->lock);
+
 err_assign:
 	fastrpc_req_munmap_impl(fl, buf);
 
@@ -2453,21 +2449,21 @@ static int fastrpc_rpmsg_probe(struct rpmsg_device *rpdev)
 
 		err = of_reserved_mem_region_to_resource(rdev->of_node, 0, &res);
 		if (!err) {
+			if (domain_id == ADSP_DOMAIN_ID) {
+				data->remote_heap =
+					kzalloc(sizeof(*data->remote_heap), GFP_KERNEL);
+				if (!data->remote_heap)
+					return -ENOMEM;
+
+				data->remote_heap->phys = res.start;
+				data->remote_heap->size = resource_size(&res);
+			}
 			src_perms = BIT(QCOM_SCM_VMID_HLOS);
 
 			err = qcom_scm_assign_mem(res.start, resource_size(&res), &src_perms,
 				    data->vmperms, data->vmcount);
 			if (err)
 				goto err_free_data;
-		}
-		if (domain_id == ADSP_DOMAIN_ID) {
-			data->remote_heap =
-				kzalloc(sizeof(*data->remote_heap), GFP_KERNEL);
-			if (!data->remote_heap)
-				return -ENOMEM;
-
-			data->remote_heap->phys = res.start;
-			data->remote_heap->size = resource_size(&res);
 		}
 	}
 
@@ -2580,7 +2576,7 @@ static void fastrpc_rpmsg_remove(struct rpmsg_device *rpdev)
 					  cctx->remote_heap->size, &src_perms,
 					  &dst_perms, 1);
 		if (!err)
-			fastrpc_buf_free(cctx->remote_heap);
+			kfree(cctx->remote_heap);
 	}
 
 	of_platform_depopulate(&rpdev->dev);
